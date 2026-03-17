@@ -1,0 +1,236 @@
+{
+  "name": "Middle East Country Risk Analyst (Free - Gemini)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 06:00 Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const countries = [\n  { name: 'Saudi Arabia', query: 'Saudi Arabia economy investment finance politics', code: 'SA' },\n  { name: 'UAE',          query: 'UAE Dubai Abu Dhabi economy investment finance',  code: 'AE' },\n  { name: 'Qatar',        query: 'Qatar economy investment finance LNG',            code: 'QA' },\n  { name: 'Egypt',        query: 'Egypt economy investment finance IMF',            code: 'EG' },\n  { name: 'Kuwait',       query: 'Kuwait economy investment finance oil',           code: 'KW' }\n];\nreturn countries.map(c => ({ json: c }));"
+      },
+      "id": "country-list",
+      "name": "Country List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://newsapi.org/v2/everything",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q",        "value": "={{ $json.query }}" },
+            { "name": "language", "value": "en" },
+            { "name": "sortBy",   "value": "publishedAt" },
+            { "name": "pageSize", "value": "20" },
+            { "name": "apiKey",   "value": "=YOUR_NEWSAPI_KEY_HERE" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-news",
+      "name": "Fetch News (NewsAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const countryItems = $('Country List').all();\nconst currentIndex = $('Fetch News (NewsAPI)').context?.currentRunIndex || 0;\nconst country = countryItems[currentIndex]?.json || countryItems[0].json;\n\nconst articles = $input.first().json.articles || [];\n\nconst headlines = articles\n  .slice(0, 20)\n  .map((a, i) => `${i+1}. [${a.source?.name || 'Unknown'}] ${a.title} — ${(a.description || '').slice(0, 120)}`)\n  .join('\\n');\n\nreturn [{\n  json: {\n    country: $('Country List').item.json.name,\n    code: $('Country List').item.json.code,\n    date: new Date().toISOString().split('T')[0],\n    headlines: headlines || 'No articles found for today.',\n    articleCount: articles.length\n  }\n}];"
+      },
+      "id": "prepare-prompt",
+      "name": "Prepare Headlines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=YOUR_GEMINI_API_KEY_HERE",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a senior investment banking analyst specialising in Middle East markets. Analyse today's news for {{ $json.country }} from an investment banking perspective.\\n\\nDate: {{ $json.date }}\\nCountry: {{ $json.country }}\\nArticles processed: {{ $json.articleCount }}\\n\\nHeadlines:\\n{{ $json.headlines }}\\n\\nRespond ONLY with a valid JSON object — no markdown, no code fences, no explanation. Just raw JSON:\\n{\\n  \\\"country\\\": \\\"string\\\",\\n  \\\"date\\\": \\\"string\\\",\\n  \\\"overall_risk_score\\\": number between 0 and 100 where higher means more risk,\\n  \\\"risk_dimensions\\\": {\\n    \\\"political_stability\\\": number,\\n    \\\"geopolitical_risk\\\": number,\\n    \\\"regulatory_risk\\\": number,\\n    \\\"fx_currency_risk\\\": number,\\n    \\\"sanctions_exposure\\\": number,\\n    \\\"corruption_index\\\": number\\n  },\\n  \\\"risk_direction\\\": \\\"improving or stable or deteriorating\\\",\\n  \\\"executive_briefing\\\": \\\"3-4 sentence summary of key developments and IB implications\\\",\\n  \\\"regulatory_updates\\\": [\\n    { \\\"title\\\": \\\"string\\\", \\\"impact\\\": \\\"positive or neutral or negative\\\", \\\"detail\\\": \\\"string\\\" }\\n  ],\\n  \\\"deal_opportunities\\\": [\\n    { \\\"type\\\": \\\"M&A or IPO or Project Finance or Capital Markets\\\", \\\"description\\\": \\\"string\\\", \\\"urgency\\\": \\\"high or medium or low\\\" }\\n  ],\\n  \\\"alerts\\\": [\\n    { \\\"severity\\\": \\\"critical or high or medium\\\", \\\"message\\\": \\\"string\\\" }\\n  ]\\n}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.3,\n    \"maxOutputTokens\": 1500\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-analysis",
+      "name": "Gemini AI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\n\nlet text = '';\ntry {\n  text = raw.candidates[0].content.parts[0].text;\n} catch(e) {\n  return [{ json: { error: 'Gemini response parse failed', raw: JSON.stringify(raw) } }];\n}\n\nlet analysis;\ntry {\n  const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();\n  analysis = JSON.parse(cleaned);\n} catch(e) {\n  const match = text.match(/\\{[\\s\\S]*\\}/);\n  try {\n    analysis = match ? JSON.parse(match[0]) : { error: 'JSON parse failed', raw: text };\n  } catch(e2) {\n    analysis = { error: 'JSON parse failed', raw: text };\n  }\n}\n\nconst prevData = $('Prepare Headlines').first().json;\nreturn [{ json: { ...prevData, analysis } }];"
+      },
+      "id": "parse-response",
+      "name": "Parse Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst a = d.analysis;\n\nif (a.error) {\n  return [{ json: { ...d, html_email: `<p>Analysis error for ${d.country}: ${a.error}</p>`, is_high_risk: false, has_critical_alert: false } }];\n}\n\nconst score = a.overall_risk_score || 0;\nconst isHighRisk = score > 65;\nconst hasCriticalAlert = (a.alerts || []).some(x => x.severity === 'critical');\nconst directionArrow = a.risk_direction === 'improving' ? '↓' : a.risk_direction === 'deteriorating' ? '↑' : '→';\nconst directionColor = a.risk_direction === 'improving' ? '#27500A' : a.risk_direction === 'deteriorating' ? '#791F1F' : '#5F5E5A';\nconst scoreColor = score < 35 ? '#27500A' : score < 65 ? '#633806' : '#791F1F';\nconst scoreBg    = score < 35 ? '#EAF3DE'  : score < 65 ? '#FAEEDA'  : '#FCEBEB';\n\nconst regulatoryHtml = (a.regulatory_updates || []).map(r => {\n  const dot = r.impact === 'positive' ? '#639922' : r.impact === 'negative' ? '#E24B4A' : '#888780';\n  return `<tr><td style=\"padding:8px 0;border-bottom:1px solid #f0f0f0;vertical-align:top\">\n    <span style=\"display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot};margin-right:8px;margin-top:4px;float:left\"></span>\n    <span style=\"font-size:13px;color:#1a1a1a\">${r.title}</span><br>\n    <span style=\"font-size:12px;color:#666\">${r.detail}</span>\n  </td></tr>`;\n}).join('');\n\nconst dealsHtml = (a.deal_opportunities || []).map(op => {\n  const urgColor = op.urgency === 'high' ? '#791F1F' : op.urgency === 'medium' ? '#633806' : '#27500A';\n  const urgBg    = op.urgency === 'high' ? '#FCEBEB' : op.urgency === 'medium' ? '#FAEEDA' : '#EAF3DE';\n  return `<tr><td style=\"padding:8px 0;border-bottom:1px solid #f0f0f0\">\n    <span style=\"font-size:10px;font-weight:600;padding:2px 8px;border-radius:99px;background:${urgBg};color:${urgColor};margin-right:8px\">${(op.urgency||'').toUpperCase()}</span>\n    <span style=\"font-size:11px;color:#888;margin-right:6px\">${op.type}</span>\n    <span style=\"font-size:13px;color:#1a1a1a\">${op.description}</span>\n  </td></tr>`;\n}).join('');\n\nconst alertsHtml = (a.alerts || []).filter(x => x.severity === 'critical' || x.severity === 'high').map(al => {\n  const bg  = al.severity === 'critical' ? '#FCEBEB' : '#FAEEDA';\n  const col = al.severity === 'critical' ? '#791F1F' : '#633806';\n  return `<div style=\"background:${bg};border-left:3px solid ${col};padding:10px 14px;margin-bottom:8px;border-radius:0 6px 6px 0\">\n    <span style=\"font-size:11px;font-weight:600;color:${col}\">${al.severity.toUpperCase()} ALERT</span><br>\n    <span style=\"font-size:13px;color:#1a1a1a\">${al.message}</span>\n  </div>`;\n}).join('');\n\nconst dims = a.risk_dimensions || {};\nconst dimRows = Object.entries(dims).map(([k, v]) => {\n  const label = k.replace(/_/g, ' ');\n  const bar = Math.round(Number(v) || 0);\n  const bCol = bar < 35 ? '#639922' : bar < 65 ? '#EF9F27' : '#E24B4A';\n  return `<tr>\n    <td style=\"font-size:12px;color:#666;padding:5px 0;width:140px;text-transform:capitalize\">${label}</td>\n    <td style=\"padding:5px 8px\"><div style=\"background:#f0f0f0;border-radius:99px;height:6px;width:100%\"><div style=\"background:${bCol};width:${bar}%;height:6px;border-radius:99px\"></div></div></td>\n    <td style=\"font-size:12px;font-weight:500;color:#1a1a1a;text-align:right;padding:5px 0;width:30px\">${bar}</td>\n  </tr>`;\n}).join('');\n\nconst html = `<!DOCTYPE html><html><body style=\"margin:0;padding:0;background:#f5f5f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif\">\n<div style=\"max-width:620px;margin:0 auto;padding:24px 16px\">\n  <div style=\"background:#042C53;border-radius:10px 10px 0 0;padding:20px 24px\">\n    <p style=\"margin:0;font-size:11px;color:#85B7EB;letter-spacing:.08em\">INVESTMENT BANKING INTELLIGENCE</p>\n    <h1 style=\"margin:6px 0 0;font-size:22px;font-weight:500;color:#fff\">${a.country || d.country}</h1>\n    <p style=\"margin:4px 0 0;font-size:12px;color:#85B7EB\">${a.date || d.date} · Automated daily briefing · Powered by Gemini AI</p>\n  </div>\n  <div style=\"background:#fff;padding:20px 24px;border-left:1px solid #e8e8e8;border-right:1px solid #e8e8e8\">\n    <table style=\"width:100%;margin-bottom:20px\"><tr>\n      <td style=\"text-align:center\">\n        <div style=\"display:inline-flex;width:64px;height:64px;border-radius:50%;background:${scoreBg};align-items:center;justify-content:center\">\n          <span style=\"font-size:22px;font-weight:500;color:${scoreColor}\">${Math.round(score)}</span>\n        </div>\n        <div style=\"font-size:11px;color:#888;margin-top:4px\">Risk score</div>\n      </td>\n      <td style=\"text-align:center\">\n        <div style=\"font-size:24px;color:${directionColor}\">${directionArrow}</div>\n        <div style=\"font-size:11px;color:#888;margin-top:4px;text-transform:capitalize\">${a.risk_direction || 'stable'}</div>\n      </td>\n      <td style=\"text-align:center\">\n        <div style=\"font-size:20px;font-weight:500;color:#1a1a1a\">${(a.deal_opportunities || []).length}</div>\n        <div style=\"font-size:11px;color:#888;margin-top:4px\">Deal signals</div>\n      </td>\n      <td style=\"text-align:center\">\n        <div style=\"font-size:20px;font-weight:500;color:${hasCriticalAlert ? '#791F1F' : '#1a1a1a'}\">${(a.alerts || []).length}</div>\n        <div style=\"font-size:11px;color:#888;margin-top:4px\">Alerts</div>\n      </td>\n    </tr></table>\n    ${alertsHtml ? `<div style=\"margin-bottom:20px\">${alertsHtml}</div>` : ''}\n    <div style=\"margin-bottom:20px\">\n      <p style=\"font-size:11px;font-weight:600;color:#888;letter-spacing:.06em;margin:0 0 8px\">EXECUTIVE BRIEFING</p>\n      <p style=\"font-size:14px;color:#1a1a1a;line-height:1.7;margin:0\">${a.executive_briefing || 'No briefing generated.'}</p>\n    </div>\n    <div style=\"margin-bottom:20px\">\n      <p style=\"font-size:11px;font-weight:600;color:#888;letter-spacing:.06em;margin:0 0 8px\">RISK DIMENSIONS</p>\n      <table style=\"width:100%\">${dimRows}</table>\n    </div>\n    ${regulatoryHtml ? `<div style=\"margin-bottom:20px\"><p style=\"font-size:11px;font-weight:600;color:#888;letter-spacing:.06em;margin:0 0 8px\">REGULATORY UPDATES</p><table style=\"width:100%\">${regulatoryHtml}</table></div>` : ''}\n    ${dealsHtml ? `<div style=\"margin-bottom:8px\"><p style=\"font-size:11px;font-weight:600;color:#888;letter-spacing:.06em;margin:0 0 8px\">DEAL OPPORTUNITIES</p><table style=\"width:100%\">${dealsHtml}</table></div>` : ''}\n  </div>\n  <div style=\"background:#f0ede8;border-radius:0 0 10px 10px;padding:14px 24px;border:1px solid #e8e8e8;border-top:none\">\n    <p style=\"margin:0;font-size:11px;color:#888\">Automated by Gemini AI + n8n · ${d.articleCount} articles processed · Internal use only</p>\n  </div>\n</div>\n</body></html>`;\n\nreturn [{ json: { ...d, html_email: html, is_high_risk: isHighRisk, has_critical_alert: hasCriticalAlert } }];"
+      },
+      "id": "build-email",
+      "name": "Build Email HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer YOUR_RESEND_API_KEY_HERE" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"onboarding@resend.dev\",\n  \"to\": [\"YOUR_EMAIL_ADDRESS_HERE\"],\n  \"subject\": \"{{ $json.analysis.risk_direction === 'deteriorating' ? '[ALERT] ' : '' }}{{ $json.country }} Risk Briefing — {{ $json.date }}\",\n  \"html\": {{ JSON.stringify($json.html_email) }}\n}",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Send Email (Resend)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1780, 180]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "tableId": "country_risk_daily",
+        "filterByFormula": "=AND(country='{{ $json.country }}', date='{{ $json.date }}')",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "country",           "fieldValue": "={{ $json.country }}" },
+            { "fieldId": "country_code",       "fieldValue": "={{ $json.code }}" },
+            { "fieldId": "date",               "fieldValue": "={{ $json.date }}" },
+            { "fieldId": "overall_risk_score", "fieldValue": "={{ $json.analysis.overall_risk_score }}" },
+            { "fieldId": "risk_direction",     "fieldValue": "={{ $json.analysis.risk_direction }}" },
+            { "fieldId": "executive_briefing", "fieldValue": "={{ $json.analysis.executive_briefing }}" },
+            { "fieldId": "analysis_json",      "fieldValue": "={{ JSON.stringify($json.analysis) }}" },
+            { "fieldId": "article_count",      "fieldValue": "={{ $json.articleCount }}" }
+          ]
+        }
+      },
+      "id": "save-to-db",
+      "name": "Save to Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1780, 420],
+      "credentials": {
+        "supabaseApi": { "id": "supabase-cred", "name": "Supabase Connection" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "alert-check",
+              "leftValue": "={{ $json.has_critical_alert }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "alert-check",
+      "name": "Critical Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1780, 620]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer YOUR_RESEND_API_KEY_HERE" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"onboarding@resend.dev\",\n  \"to\": [\"YOUR_EMAIL_ADDRESS_HERE\"],\n  \"subject\": \"CRITICAL ALERT — {{ $json.country }} — {{ $json.date }}\",\n  \"html\": \"<p style='font-family:sans-serif'><strong style='color:#791F1F'>CRITICAL RISK ALERT</strong><br><br>Country: <strong>{{ $json.country }}</strong><br>Date: {{ $json.date }}<br>Risk Score: {{ $json.analysis.overall_risk_score }}/100<br><br>Check your n8n dashboard for the full briefing.</p>\"\n}",
+        "options": {}
+      },
+      "id": "send-alert-email",
+      "name": "Send Critical Alert Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2000, 560]
+    }
+  ],
+  "connections": {
+    "Daily 06:00 Trigger": {
+      "main": [[{ "node": "Country List", "type": "main", "index": 0 }]]
+    },
+    "Country List": {
+      "main": [[{ "node": "Fetch News (NewsAPI)", "type": "main", "index": 0 }]]
+    },
+    "Fetch News (NewsAPI)": {
+      "main": [[{ "node": "Prepare Headlines", "type": "main", "index": 0 }]]
+    },
+    "Prepare Headlines": {
+      "main": [[{ "node": "Gemini AI Analysis", "type": "main", "index": 0 }]]
+    },
+    "Gemini AI Analysis": {
+      "main": [[{ "node": "Parse Gemini Response", "type": "main", "index": 0 }]]
+    },
+    "Parse Gemini Response": {
+      "main": [[{ "node": "Build Email HTML", "type": "main", "index": 0 }]]
+    },
+    "Build Email HTML": {
+      "main": [[
+        { "node": "Send Email (Resend)",       "type": "main", "index": 0 },
+        { "node": "Save to Supabase",          "type": "main", "index": 0 },
+        { "node": "Critical Alert?",           "type": "main", "index": 0 }
+      ]]
+    },
+    "Critical Alert?": {
+      "main": [
+        [{ "node": "Send Critical Alert Email", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}
